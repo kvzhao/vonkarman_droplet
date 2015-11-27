@@ -1,0 +1,146 @@
+1 0 GfsAxi GfsBox GfsGEdge {} {
+Global {
+   /* Refinement */
+   #define levelmin 9
+   #define levelmax 14
+
+   /* Physical Parameters, UNIT:SI*/
+   #define Rho_liq 1120.
+   #define Mu_liq .0010099
+   #define Rho_air 1.21
+   #define Mu_air 1.81e-5
+   #define Sig 0.0674 /* Surface tension */
+   #define V0 2.8422
+   #define D .0046
+   #define g 9.81
+   #define PH 0.005 /* Pool depth */
+
+   /* Smulation parameters */
+   #define radius 0.22
+   #define eps 0.001
+   #define Lbox (D/(2*radius)) /* box size */
+   #define gad (Lbox*g/(V0*V0)) /* gravity */
+   #define xccS (PH/Lbox - 0.5) /* Pool surface position */
+   #define xcc(t) (xccS + 1.1*radius -t) /* Drop center: 0.1radius above the pool */
+   #define ycc 0. /* Drop center */
+   #define goutte(x,y,t) ((x-xcc(t))*(x-xcc(t)) + (y-ycc)*(y-ycc)) /* drop shape */
+   #define Quo_mu (Mu_air/Mu_liq) /* viscosity ratio */
+   #define Quo_rho (Rho_air/Rho_liq) /* density ratio */
+   #define VAR(T,min,max) (min+CLAMP(T,0.,1.)*(max-min)) /* T is between 0 and 1 */
+   #define rho(T) (VAR(T,Quo_rho,1.))
+   #define mu(T) (VAR(T,Quo_mu,1.))
+}
+
+# Refine near pool surface
+Refine {
+   if ((x >= xccS - 0.003) && (x <= xccS + 0.003)) {return levelmax;}
+   else {return levelmin;}
+} # End of Refine
+# Refine near the edge of the drop 
+Refine {
+   if((goutte(x,y,0) <= (radius+0.003)*(radius+0.003)) && (goutte(x,y,0) >= (radius-0.003)*(radius-0.003)))
+   {return levelmax;}
+   else {return levelmin;}
+} #End of Refine
+
+# Use different tracers to identify the liquid from the drop and the pool
+# T is the main tracer used for curvature
+# Tdrop and T are passive tracer
+VariableTracerVOF T
+VariableTracerVOF Tdrop
+VariableTracerVOF Tpool
+VariableFiltered TF T 1
+VariableCurvature K T
+SourceTension T(Sig/(Rho_liq*Lbox*V0*V0)) K
+
+# Initial conditions
+InitFraction T({
+   double drop = radius*radius - goutte(x,y,0);
+   double pool = xccS - x;
+   return -union(-drop, -pool);
+})
+
+Init {} {
+   U = ((goutte(x,y,0) <= radius*radius) ? -1. :0)
+}
+
+InitFraction Tdrop (radius*radius - goutte(x,y,0))
+InitFraction Tpool (xccS - x)
+
+Source {} U(-1.*gad)
+
+# Main refinement
+AdaptGradient {istep = 1} {maxlevel = levelmax minlevel = levelmin cmax = 1e-6} T
+AdaptGradient {istep = 1} {maxlevel = levelmax minlevel = levelmin cmax = 1e-6} Tdrop
+AdaptGradient {istep = 1} {maxlevel = levelmax minlevel = levelmin cmax = 1e-6} Tpool
+AdaptVorticity {istep = 1} {maxlevel = levelmax minlevel = levelmin cmax = 1e-2}
+
+# Ejecta sheet refinement
+AdaptFunction {istep = 1} {maxlevel = levelmax minlevel = levelmin cmax = 0} ((x > xccS+eps) && (goutte(x,y,t) > (radius+eps)*(radius+eps)) ? T >0.:0)
+AdaptGradient {istep = 1} {maxlevel = levelmax minlevel = levelmin cmax = 1e-6} ((x > xccS+eps) && (goutte(x,y,t) > (radius+eps)*(radius+eps)) ? T :0)
+
+# Contact refinement 0.1
+AdaptFunction {istep = 1} {maxlevel = levelmax minlevel = levelmin cmax = 0} ((y < 0.1) &&(x > xccS-eps) && (goutte(x,y,t) > (radius-eps)*(radius-eps)) ? T > 0. : 0)
+AdaptFunction {istep = 1 start=0.02} {maxlevel = levelmax minlevel = levelmin cmax = 0} ((x > xccS - 0.2*radius) && (x < xccS+0.2*radius) && (y<0.1) ? T < 1. : 0)
+AdaptGradient {istep = 1 start=0.02} {maxlevel = levelmax minlevel = levelmin cmax = 1e-6} ((x > xccS - 0.2*radius) && (x < xccS+0.2*radius) && (y<0.1) ? T : 0)
+
+SourceViscosity {istep = 1} (Mu_liq/(Rho_liq*Lbox*V0))*mu(TF) {
+   tolerance = 1e-07
+   nrelax = 7
+   erelax = 2
+   minlevel = 0
+   nitermax = 4000
+   nitermin = 1
+   weighted = 0
+   beta= 0.5
+}
+PhysicalParams {alpha = 1./rho(TF)}
+EventBalance{istep=1} 0.1 
+RemoveDroplets {istep=1} T 30 (1-T) 1 # Remove small bubbles
+RemoveDroplets {istep=1} T 30 # Remove small droplets
+
+GfsAdvectionParams {
+   cfl = 0.5
+   gradient = gfs_center_gradient
+   flux = gfs_face_velocity_advection_flux
+   average = 1
+   scheme = godunov
+}
+
+GfsApproxProjectionParams {
+   tolerance = 1e-07
+   nrelax = 7
+   erelax = 2
+   minlevel = 0
+   nitermax = 4000
+   nitermin = 1
+   weighted = 0
+   beta= 0.5
+}
+
+GfsProjectionParams {
+   tolerance = 1e-07
+   nrelax = 7
+   erelax = 2
+   minlevel = 0
+   nitermax = 4000
+   nitermin = 1
+   weighted = 0
+   beta= 0.5
+}
+
+# Output parameters
+GfsOutputTime {step =0.001} stdout
+GfsOutputProjectionStats {step =0.001} stdout
+GfsOutputSimulation {step=0.001} goutte-bin-%5.3f.gfs {binary=1 format=gfs}
+GfsOutputSimulation {step=0.0001 start = 0.02 end = 0.03} goutte-bin-%6.4f.gfs {binary=1 format=gfs}
+
+}
+
+# Boundary Condition
+GfsBox{id = 1 pid=0
+left = Boundary {BcDirichlet U 0 BcDirichlet V 0}
+right = GfsBoundaryOutflow
+top = Boundary {BcDirichlet U 0 BcDirichlet V 0}
+bottom = Boundary
+}
